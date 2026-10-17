@@ -6,20 +6,26 @@
         ".write": "auth != null && auth.uid === $uid"
       }
     },
+    "contacts": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$contactId": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      }
+    },
     "user_chats": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
         "$chatId": {
-          ".write": "auth != null && (auth.uid === $uid || root.child('user_chats').child(auth.uid).child($chatId).exists())"
+          ".write": "auth != null"
         }
       }
     },
     "messages": {
       "$chatId": {
-        ".read": "auth != null && root.child('user_chats').child(auth.uid).child($chatId).exists()",
-        "$messageId": {
-          ".write": "auth != null && root.child('user_chats').child(auth.uid).child($chatId).exists() && newData.child('sender_uid').val() === auth.uid"
-        }
+        ".read": "auth != null",
+        ".write": "auth != null"
       }
     }
   }

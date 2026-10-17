@@ -30,7 +30,6 @@ CONFIG_FILE = "firebase_config.json"
 
 
 def http_json(url, method="GET", payload=None, headers=None):
-    # Fix: Always include Content-Type so Firebase can read the JSON payload
     h = {"Content-Type": "application/json"}
     if headers:
         h.update(headers)
@@ -84,9 +83,9 @@ class Firebase:
             "phone": phone, "created_at": {".sv": "timestamp"}
         })
 
-    def find_user(self, username):
+    def find_user(self, query):
         users = self.db("users") or {}
-        needle = username.strip().lower()
+        needle = query.strip().lower()
         for uid, profile in users.items():
             if uid != self.uid and (profile.get("username", "").lower() == needle or
                                     profile.get("email", "").lower() == needle):
@@ -126,6 +125,14 @@ class ChatterlyApp(MDApp):
         self.dialog = None
         self.chat_peer_uid = ""
         self.chat_items = []
+        
+        # Real-time variables to prevent input dropping
+        self.email_val = ""
+        self.password_val = ""
+        self.username_val = ""
+        self.find_val = ""
+        self.message_val = ""
+
         self.manager = ScreenManager(transition=FadeTransition(duration=.18))
         self.manager.add_widget(self.make_auth_screen())
         self.manager.add_widget(self.make_home_screen())
@@ -147,9 +154,15 @@ class ChatterlyApp(MDApp):
                                 theme_text_color="Custom", text_color=(0.02, .48, .43, 1)))
         root.add_widget(MDLabel(text="Private conversations. Real people.", adaptive_height=True,
                                 theme_text_color="Secondary"))
+        
         self.email_field = MDTextField(hint_text="Email address", mode="rectangle")
         self.password_field = MDTextField(hint_text="Password", mode="rectangle", password=True)
         self.username_field = MDTextField(hint_text="Username (for new account)", mode="rectangle")
+        
+        self.email_field.bind(text=lambda instance, val: setattr(self, 'email_val', val))
+        self.password_field.bind(text=lambda instance, val: setattr(self, 'password_val', val))
+        self.username_field.bind(text=lambda instance, val: setattr(self, 'username_val', val))
+
         root.add_widget(self.email_field)
         root.add_widget(self.password_field)
         root.add_widget(self.username_field)
@@ -193,6 +206,8 @@ class ChatterlyApp(MDApp):
         root.add_widget(scroll)
         composer = MDBoxLayout(size_hint_y=None, height=dp(64), padding=[dp(8), dp(6)], spacing=dp(8))
         self.message_field = MDTextField(hint_text="Message", mode="rectangle", multiline=False)
+        self.message_field.bind(text=lambda instance, val: setattr(self, 'message_val', val))
+        
         composer.add_widget(self.message_field)
         composer.add_widget(MDIconButton(icon="send", on_release=lambda *_: self.send_message()))
         root.add_widget(composer)
@@ -200,22 +215,19 @@ class ChatterlyApp(MDApp):
         return screen
 
     def do_auth(self, signup):
-        self.email_field.focus = False
-        self.password_field.focus = False
-        self.username_field.focus = False
-        Clock.schedule_once(lambda dt: self._execute_auth(signup), 0.05)
-
-    def _execute_auth(self, signup):
         config = self.read_config()
         if not config or not config.get("api_key") or not config.get("database_url"):
             self.alert("Firebase setup needed", "Create firebase_config.json using the instructions in README.md.")
             return
-        email = self.email_field.text.strip()
-        password = self.password_field.text
-        username = self.username_field.text.strip()
+        
+        email = self.email_val.strip()
+        password = self.password_val
+        username = self.username_val.strip()
+        
         if not email or not password or (signup and not username):
             self.alert("Missing information", "Enter email and password. New accounts also need a username.")
             return
+            
         self.home_status.text = "Connecting…"
         def task():
             try:
@@ -257,7 +269,7 @@ class ChatterlyApp(MDApp):
         self.chat_list.clear_widgets()
         if not rows:
             self.chat_list.add_widget(TwoLineAvatarIconListItem(
-                text="No conversations yet", secondary_text="Tap the + icon to find a real user."
+                text="No conversations yet", secondary_text="Tap the + icon in the top right to add a contact by email."
             ))
             return
         for chat_id, name, peer_uid in rows:
@@ -267,47 +279,59 @@ class ChatterlyApp(MDApp):
             self.chat_list.add_widget(item)
 
     def open_find_user(self):
-        self.find_field = MDTextField(hint_text="Exact username or email", mode="rectangle")
-        self.dialog = MDDialog(title="Find a real person",
+        self.find_field = MDTextField(hint_text="Enter friend's exact email", mode="rectangle")
+        self.find_val = ""
+        self.find_field.bind(text=lambda instance, val: setattr(self, 'find_val', val))
+        
+        self.dialog = MDDialog(title="Add Contact by Email",
                                type="custom",
                                content_cls=self.find_field,
                                buttons=[
                                    MDFlatButton(text="CANCEL", on_release=lambda *_: self.dialog.dismiss()),
-                                   MDRaisedButton(text="FIND", on_release=lambda *_: self.find_user())
+                                   MDRaisedButton(text="ADD CONTACT", on_release=lambda *_: self.process_add_contact())
                                ])
         self.dialog.open()
 
-    def find_user(self):
-        if hasattr(self, 'find_field'):
-            self.find_field.focus = False
-        Clock.schedule_once(lambda dt: self._execute_find_user(), 0.05)
-
-    def _execute_find_user(self):
-        query = self.find_field.text.strip() if hasattr(self, 'find_field') else ""
+    def process_add_contact(self):
+        query = self.find_val.strip()
         if self.dialog:
             self.dialog.dismiss()
         if not query:
+            self.alert("Error", "Please enter a valid email address.")
             return
+        
+        self.home_status.text = "Searching user..."
         def task():
             try:
                 peer = self.firebase.find_user(query)
                 if not peer:
-                    Clock.schedule_once(lambda dt: self.alert("No user found",
-                        "No registered user matches that username or email. Ask them to create an account first."), 0)
+                    Clock.schedule_once(lambda dt: self.alert("User Not Found",
+                        f"No registered user matches '{query}'. Make sure they have created an account first."), 0)
                     return
+                
                 peer_uid = peer["uid"]
+                peer_name = peer.get("username", peer.get("email", "Chat"))
+                peer_email = peer.get("email", "")
+                
+                # Save into contacts database node
+                self.firebase.db(f"contacts/{self.firebase.uid}/{peer_uid}", "PUT", {
+                    "uid": peer_uid, "username": peer_name, "email": peer_email
+                })
+                
+                # Create chat channel
                 ids = sorted([self.firebase.uid, peer_uid])
                 chat_id = "_".join(ids)
                 my_name = self.firebase.db(f"users/{self.firebase.uid}").get("username", self.firebase.email)
-                peer_name = peer.get("username", peer.get("email", "Chat"))
+                
                 self.firebase.db(f"user_chats/{self.firebase.uid}/{chat_id}", "PUT",
                                  {"peer_uid": peer_uid, "name": peer_name})
                 self.firebase.db(f"user_chats/{peer_uid}/{chat_id}", "PUT",
                                  {"peer_uid": self.firebase.uid, "name": my_name})
+                
                 Clock.schedule_once(lambda dt: self.open_chat(chat_id, peer_name, peer_uid), 0)
             except Exception as e:
                 error_msg = str(e)
-                Clock.schedule_once(lambda dt: self.alert("Search failed", error_msg), 0)
+                Clock.schedule_once(lambda dt: self.alert("Add Contact Failed", error_msg), 0)
         threading.Thread(target=task, daemon=True).start()
 
     def open_chat(self, chat_id, name, peer_uid):
@@ -352,15 +376,11 @@ class ChatterlyApp(MDApp):
         Animation(opacity=1, duration=.12).start(self.message_stack)
 
     def send_message(self):
-        self.message_field.focus = False
-        Clock.schedule_once(lambda dt: self._execute_send_message(), 0.05)
-
-    def _execute_send_message(self):
-        text = self.message_field.text.strip()
+        text = self.message_val.strip()
         if not text or not self.current_chat_id:
             return
         self.message_field.text = ""
-        self.message_field.focus = False
+        self.message_val = ""
         def task():
             try:
                 self.firebase.send_message(self.current_chat_id, text)
